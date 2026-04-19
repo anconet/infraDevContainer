@@ -11,6 +11,8 @@ The repo is intended to help setup a project to support VSCode Dev Containers.
 
 To setup project for dev containers, the three VSCode Dev Container files need to be in some way connected to the .devcontainer directory in the root of the project.
 
+Since this project is a repo that will be installed as a git submodule, the root project directory should default to one directory above.
+
 There are two ways the dev container files are connected to the .devcontainer directory.
 
 ### Option 1: Copy 

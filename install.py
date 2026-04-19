@@ -49,8 +49,16 @@ class InstallConfig:
             raise ValueError(f"Installer directory does not exist: {config.scriptRoot}")
 
 
+def determineDefaultProjectRoot(scriptRoot: Path) -> Path:
+    """Return the default project root expected for a submodule installation."""
+    return scriptRoot.parent
+
+
 def buildArgumentParser() -> argparse.ArgumentParser:
     """Create the command-line parser for the installer."""
+    scriptRoot: Path = Path(__file__).resolve().parent
+    defaultProjectRoot: Path = determineDefaultProjectRoot(scriptRoot)
+
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
         description=(
             "Install or uninstall VS Code dev container files by copying or "
@@ -72,8 +80,11 @@ def buildArgumentParser() -> argparse.ArgumentParser:
     installParser.add_argument(
         "--project-root",
         type=Path,
-        default=Path.cwd(),
-        help="Project root where the .devcontainer directory will be created.",
+        default=defaultProjectRoot,
+        help=(
+            "Project root where the .devcontainer directory will be created. "
+            "Defaults to the directory above the installer repository."
+        ),
     )
 
     uninstallParser = subparsers.add_parser(
@@ -83,8 +94,11 @@ def buildArgumentParser() -> argparse.ArgumentParser:
     uninstallParser.add_argument(
         "--project-root",
         type=Path,
-        default=Path.cwd(),
-        help="Project root that contains the .devcontainer directory.",
+        default=defaultProjectRoot,
+        help=(
+            "Project root that contains the .devcontainer directory. "
+            "Defaults to the directory above the installer repository."
+        ),
     )
     uninstallParser.add_argument(
         "--yes",
