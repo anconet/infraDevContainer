@@ -1,5 +1,5 @@
 {
-    "name": "SystemVerilog Dev",
+    "name": "Generic Dev Container",
     "build": {
         "dockerfile": "Dockerfile"
     },
@@ -7,7 +7,7 @@
     "containerUser": "vscode",
     "runArgs": [
         "--name",
-        "systemVerilogDev"
+        "genericDevContainer"
     ],
     "remoteEnv": {
         "LANG": "C.UTF-8"
@@ -16,7 +16,6 @@
     "customizations": {
         "vscode": {
             "extensions": [
-                "mshr-h.veriloghdl",
                 "ms-python.python",
                 "mhutchie.git-graph"
             ]
