@@ -27,7 +27,7 @@
                 "sourceDirectory": "",
                 "destination": ".devcontainer",
                 "type": "link",
-                "writePolicy": "overwrite"
+                "writePolicy": "overWrite"
             }
         }
     ]
