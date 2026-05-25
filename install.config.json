@@ -1,0 +1,34 @@
+{
+    "projectDirectory": "",
+    "installDirectory": "",
+    "manifestFile": ".infraDevContainer.manifest.json",
+    "elements": [
+        {
+            "file": {
+                "fileName": "devcontainer.json",
+                "sourceDirectory": "",
+                "destination": ".devcontainer",
+                "type":"link",
+                "writePolicy": "overWrite"
+            }
+        },
+        {
+            "file": {
+                "fileName": "Dockerfile",
+                "sourceDirectory": "",
+                "destination": ".devcontainer",
+                "type":"link",
+                "writePolicy": "overWrite"
+            }
+        },
+{
+            "file": {
+                "fileName": "post-create.sh",
+                "sourceDirectory": "",
+                "destination": ".devcontainer",
+                "type": "link",
+                "writePolicy": "overwrite"
+            }
+        }
+    ]
+}

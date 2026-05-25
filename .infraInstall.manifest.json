@@ -1,0 +1,16 @@
+{
+  "installed": [
+    {
+      "type": "file",
+      "source": "install.py",
+      "destination": "install.py",
+      "destinationBase": "projectDir"
+    },
+    {
+      "type": "file",
+      "source": "install.config.json",
+      "destination": "install.config.json",
+      "destinationBase": "projectDir"
+    }
+  ]
+}
