@@ -8,7 +8,7 @@
                 "fileName": "devcontainer.json",
                 "sourceDirectory": "",
                 "destination": ".devcontainer",
-                "type":"link",
+                "type": "link",
                 "writePolicy": "overWrite"
             }
         },
@@ -17,17 +17,17 @@
                 "fileName": "Dockerfile",
                 "sourceDirectory": "",
                 "destination": ".devcontainer",
-                "type":"link",
+                "type": "link",
                 "writePolicy": "overWrite"
             }
         },
-{
+        {
             "file": {
                 "fileName": "post-create.sh",
                 "sourceDirectory": "",
                 "destination": ".devcontainer",
-                "type": "link",
-                "writePolicy": "overWrite"
+                "type": "copy",
+                "writePolicy": "createCopy"
             }
         }
     ]
