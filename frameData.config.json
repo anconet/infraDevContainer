@@ -1,0 +1,16 @@
+{
+  "projectDirectory": "",
+  "tagList": [],
+  "directoryList": [
+    {
+      "name": ".devcontainer",
+      "tag": {
+        "kind": "location",
+        "name": "Tag-devcontainer"
+      }
+    }
+  ],
+  "dataGroupList": [
+    "devcontainerGroup"
+  ]
+}

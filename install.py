@@ -1,728 +1,826 @@
 #!/usr/bin/env python3
-"""
-Install script for infraInstall.
 
-This script reads install.config.json and performs file/directory operations
-to install components into a parent repository. Supports both install and
-uninstall operations with manifest tracking.
+"""Install and uninstall frame directories and datagroups.
+
+This script implements the behavior described in frame.spec.md.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
 import os
 import shutil
 import sys
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
+Kind = Literal["location", "file"]
+WritePolicy = Literal["force", "copy", "skip"]
 
-class FileElement(TypedDict):
-    """Type definition for file element in config."""
-
-    fileName: str
-    sourceDirectory: str
-    destination: str
-    type: Literal["copy", "link"]
-    writePolicy: Literal["overWrite", "createCopy", "skip"]
-
-
-class DirectoryElement(TypedDict):
-    """Type definition for directory element in config."""
-
-    sourceName: str
-    destinationName: str
-    type: Literal["copy", "link"]
-
-
-class ConfigElement(TypedDict):
-    """Type definition for a config element (file or directory)."""
-
-    file: FileElement | None
-    directory: DirectoryElement | None
-
-
-class InstallConfig(TypedDict):
-    """Type definition for the install.config.json structure."""
-
-    projectDirectory: str
-    installDirectory: str
-    manifestFile: str
-    elements: list[dict[str, Any]]
+FRAME_CONFIG_NAME = "frameData.config.json"
+ALL_DATA_GROUP_NAME = "all"
+RESERVED_FILE_CHARS = set('<>:"|?*')
+RESERVED_WINDOWS_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+}
 
 
-class InstallationTracker:
-    """Tracks installed files and directories for uninstall capability."""
+class Tag(TypedDict):
+    """Tag that maps datagroup files to a destination directory."""
 
-    def __init__(self, manifestPath: Path) -> None:
-        """
-        Initialize the installation tracker.
-
-        Args:
-            manifestPath: Path where manifest file will be stored
-        """
-        self.manifestPath: Path = manifestPath
-        self.installedItems: list[dict[str, Any]] = []
-
-    def addFile(
-        self,
-        sourceFile: str,
-        destinationFile: str,
-        destinationBase: Literal["scriptDir", "projectDir"],
-    ) -> None:
-        """
-        Record an installed file.
-
-        Args:
-            sourceFile: Source file path stored in manifest
-            destinationFile: Destination file path stored in manifest
-            destinationBase: Base path used to resolve destination during uninstall
-        """
-        self.installedItems.append(
-            {
-                "type": "file",
-                "source": sourceFile,
-                "destination": destinationFile,
-                "destinationBase": destinationBase,
-            }
-        )
-
-    def addDirectory(
-        self,
-        sourceDir: str,
-        destinationDir: str,
-        destinationBase: Literal["scriptDir", "projectDir"],
-    ) -> None:
-        """
-        Record an installed directory.
-
-        Args:
-            sourceDir: Source directory path stored in manifest
-            destinationDir: Destination directory path stored in manifest
-            destinationBase: Base path used to resolve destination during uninstall
-        """
-        self.installedItems.append(
-            {
-                "type": "directory",
-                "source": sourceDir,
-                "destination": destinationDir,
-                "destinationBase": destinationBase,
-            }
-        )
-
-    def saveManifest(self) -> None:
-        """Save manifest file to disk."""
-        self.manifestPath.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.manifestPath, "w") as f:
-            json.dump({"installed": self.installedItems}, f, indent=2)
-        print(f"Manifest saved to {self.manifestPath}")
-
-    def loadManifest(self) -> bool:
-        """
-        Load manifest file from disk.
-
-        Returns:
-            True if manifest loaded successfully, False if file not found
-        """
-        if not self.manifestPath.exists():
-            return False
-
-        try:
-            with open(self.manifestPath, "r") as f:
-                data: Any = json.load(f)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Manifest JSON parse error: {e}") from e
-        except OSError as e:
-            raise ValueError(f"Unable to read manifest file: {e}") from e
-
-        if not isinstance(data, dict):
-            raise ValueError("Manifest content must be a JSON object")
-
-        installedItems: Any = data.get("installed", [])
-        if not isinstance(installedItems, list):
-            raise ValueError("Manifest field 'installed' must be an array")
-
-        self.installedItems = cast(list[dict[str, Any]], installedItems)
-        return True
-
-
-class Installer:
-    """Main installer class for handling install/uninstall operations."""
-
-    def __init__(self, configPath: Path) -> None:
-        """
-        Initialize the installer.
-
-        Args:
-            configPath: Path to install.config.json
-        """
-        self.configPath: Path = configPath
-        self.config: InstallConfig | None = None
-        self.scriptDir: Path = configPath.parent
-        self.projectDir: Path | None = None
-        self.tracker: InstallationTracker | None = None
-
-    def loadConfig(self) -> bool:
-        """
-        Load and validate configuration file.
-
-        Returns:
-            True if config loaded successfully
-        """
-        if not self.configPath.exists():
-            print(f"Error: Config file not found at {self.configPath}")
-            return False
-
-        try:
-            with open(self.configPath, "r") as f:
-                data: Any = json.load(f)
-                if not isinstance(data, dict):
-                    print("Error: Config must be a JSON object")
-                    return False
-                self.config = cast(InstallConfig, data)
-        except json.JSONDecodeError as e:
-            print(f"Error: Invalid JSON in config file: {e}")
-            return False
-        except OSError as e:
-            print(f"Error: Unable to read config file: {e}")
-            return False
-
-        return True
-
-    def resolveProjectDirectory(self) -> bool:
-        """
-        Resolve the project directory path.
-
-        Returns:
-            True if project directory is valid
-        """
-        if self.config is None:
-            return False
-
-        projectDirStr: str = self.config["projectDirectory"]
-
-        if projectDirStr == "":
-            self.projectDir = self.scriptDir.parent
-        else:
-            projectPath: Path = Path(projectDirStr)
-            if projectPath.is_absolute():
-                print("Error: projectDirectory must be a relative path")
-                return False
-            if ".." in projectPath.parts:
-                print("Error: projectDirectory must not contain path traversal '..'")
-                return False
-
-            self.projectDir = self.scriptDir.joinpath(projectPath)
-
-        if not self.projectDir.exists():
-            print(f"Error: Project directory not found at {self.projectDir}")
-            return False
-
-        return True
+    kind: Kind
+    name: str
 
     @staticmethod
-    def validateConfig(configData: InstallConfig) -> None:
-        """
-        Validate configuration structure and values required for installation.
-
-        Args:
-            configData: Parsed install configuration
-
-        Raises:
-            ValueError: If configuration is invalid
-        """
-        requiredTopLevelKeys: tuple[str, ...] = (
-            "projectDirectory",
-            "installDirectory",
-            "manifestFile",
-            "elements",
-        )
-        missingKeys: list[str] = [
-            key for key in requiredTopLevelKeys if key not in configData
-        ]
-        if missingKeys:
-            missingKeysDisplay: str = ", ".join(missingKeys)
-            raise ValueError(f"config is missing required key(s): {missingKeysDisplay}")
-
-        projectDirectory: Any = configData["projectDirectory"]
-        installDirectory: Any = configData["installDirectory"]
-        manifestFile: Any = configData["manifestFile"]
-        elementsValue: Any = configData["elements"]
-
-        if not isinstance(projectDirectory, str):
-            raise ValueError("'projectDirectory' must be a string")
-        if not isinstance(installDirectory, str):
-            raise ValueError("'installDirectory' must be a string")
-        if not isinstance(manifestFile, str):
-            raise ValueError("'manifestFile' must be a string")
-        if manifestFile == "":
-            raise ValueError("'manifestFile' must be a non-empty string")
-        if not isinstance(elementsValue, list):
-            raise ValueError("'elements' must be an array")
-
-        if installDirectory != "":
-            installDirectoryPath: Path = Path(installDirectory)
-            if installDirectoryPath.is_absolute():
-                raise ValueError("'installDirectory' must be a relative path")
-            if ".." in installDirectoryPath.parts:
-                raise ValueError(
-                    "'installDirectory' must not contain path traversal '..'"
-                )
-
-        manifestFilePath: Path = Path(manifestFile)
-        if manifestFilePath.is_absolute():
-            raise ValueError("'manifestFile' must be a relative path")
-        if ".." in manifestFilePath.parts:
-            raise ValueError("'manifestFile' must not contain path traversal '..'")
-
-        elements: list[dict[str, Any]] = cast(list[dict[str, Any]], elementsValue)
-        if len(elements) == 0:
-            raise ValueError("elements array is empty; nothing to install")
-
-        for element in elements:
-            hasFile: bool = "file" in element
-            hasDirectory: bool = "directory" in element
-            if hasFile == hasDirectory:
-                raise ValueError(
-                    "invalid element type found; each element must contain exactly one of 'file' or 'directory'"
-                )
-
-            if hasFile:
-                fileElementRaw: Any = element["file"]
-                if not isinstance(fileElementRaw, dict):
-                    raise ValueError("file element must be an object")
-
-                requiredFileKeys: tuple[str, ...] = (
-                    "fileName",
-                    "sourceDirectory",
-                    "destination",
-                    "type",
-                    "writePolicy",
-                )
-                for key in requiredFileKeys:
-                    if key not in fileElementRaw:
-                        raise ValueError(f"file element is missing required key '{key}'")
-
-                fileName: Any = fileElementRaw["fileName"]
-                sourceDirectory: Any = fileElementRaw["sourceDirectory"]
-                destination: Any = fileElementRaw["destination"]
-                fileType: Any = fileElementRaw["type"]
-                writePolicy: Any = fileElementRaw["writePolicy"]
-
-                if not isinstance(fileName, str) or fileName == "":
-                    raise ValueError("file element 'fileName' must be a non-empty string")
-                if not isinstance(sourceDirectory, str):
-                    raise ValueError("file element 'sourceDirectory' must be a string")
-                if not isinstance(destination, str):
-                    raise ValueError("file element 'destination' must be a string")
-                if fileType not in ("copy", "link"):
-                    raise ValueError("file element 'type' must be either 'copy' or 'link'")
-                if writePolicy not in ("overWrite", "createCopy", "skip"):
-                    raise ValueError(
-                        "file element 'writePolicy' must be one of 'overWrite', 'createCopy', or 'skip'"
-                    )
-
-            if hasDirectory:
-                directoryElementRaw: Any = element["directory"]
-                if not isinstance(directoryElementRaw, dict):
-                    raise ValueError("directory element must be an object")
-
-                requiredDirectoryKeys: tuple[str, ...] = (
-                    "sourceName",
-                    "destinationName",
-                    "type",
-                )
-                for key in requiredDirectoryKeys:
-                    if key not in directoryElementRaw:
-                        raise ValueError(
-                            f"directory element is missing required key '{key}'"
-                        )
-
-                sourceName: Any = directoryElementRaw["sourceName"]
-                destinationName: Any = directoryElementRaw["destinationName"]
-                directoryType: Any = directoryElementRaw["type"]
-
-                if not isinstance(sourceName, str) or sourceName == "":
-                    raise ValueError(
-                        "directory element 'sourceName' must be a non-empty string"
-                    )
-                if not isinstance(destinationName, str):
-                    raise ValueError(
-                        "directory element 'destinationName' must be a string"
-                    )
-                if directoryType not in ("copy", "link"):
-                    raise ValueError(
-                        "directory element 'type' must be either 'copy' or 'link'"
-                    )
-
-    def install(self) -> bool:
-        """
-        Perform installation of files and directories.
-
-        Returns:
-            True if installation successful
-        """
-        if not self.loadConfig():
-            return False
-
-        try:
-            self.validateConfig(cast(InstallConfig, self.config))
-        except ValueError as e:
-            print(f"Error: {e}")
-            return False
-
-        if not self.resolveProjectDirectory():
-            return False
-
-        manifestFileName: str = self.config["manifestFile"]
-        if manifestFileName:
-            manifestPath: Path = self.projectDir.joinpath(manifestFileName)
-        else:
-            manifestPath = None
-
-        self.tracker = InstallationTracker(manifestPath) if manifestPath else None
-
-        installDir: str = self.config["installDirectory"]
-        if installDir:
-            targetBaseDir: Path = self.projectDir.joinpath(installDir)
-        else:
-            targetBaseDir = self.projectDir
-
-        try:
-            targetBaseDir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            print(f"Error creating destination directory '{targetBaseDir}': {e}")
-            return False
-
-        elements: list[dict[str, Any]] = cast(list[dict[str, Any]], self.config["elements"])
-        for element in elements:
-            if "file" in element:
-                fileElem: FileElement = cast(FileElement, element["file"])
-                if not self._installFile(fileElem, targetBaseDir):
-                    return False
-            elif "directory" in element:
-                dirElem: DirectoryElement = cast(DirectoryElement, element["directory"])
-                if not self._installDirectory(dirElem, targetBaseDir):
-                    return False
-
-        if manifestPath and self.tracker:
-            try:
-                self.tracker.saveManifest()
-            except (OSError, IOError, TypeError, ValueError) as e:
-                print(f"Error writing manifest file '{manifestPath}': {e}")
-                return False
-
-        print("Installation completed successfully!")
-        return True
-
-    def _manifestRelativeFromScriptDir(self, pathValue: Path) -> str:
-        """
-        Convert a path to a script-directory-relative manifest path.
-
-        Args:
-            pathValue: Absolute path to convert
-
-        Returns:
-            Relative path string from script directory
-
-        Raises:
-            ValueError: If path cannot be represented relative to script directory
-        """
-        try:
-            relativePath: Path = pathValue.relative_to(self.scriptDir)
-        except ValueError as e:
+    def validate(obj: dict[str, Any]) -> Tag:
+        """Validate a raw JSON object as a Tag."""
+        if "kind" not in obj or not isinstance(obj["kind"], str):
+            raise ValueError("Invalid Tag: 'kind' is required and must be a string")
+        if obj["kind"] not in {"location", "file"}:
+            raise ValueError("Invalid Tag: 'kind' must be 'location' or 'file'")
+        if "name" not in obj or not isinstance(obj["name"], str):
+            raise ValueError("Invalid Tag: 'name' is required and must be a string")
+        if obj["name"] == "":
+            raise ValueError("Invalid Tag: 'name' must be non-empty")
+        if not obj["name"].replace("_", "").isalnum():
             raise ValueError(
-                f"Path cannot be represented relative to script directory: {pathValue}"
-            ) from e
+                "Invalid Tag: 'name' must contain only alphanumeric characters and underscores"
+            )
+        return cast(Tag, obj)
 
-        return str(relativePath)
 
-    def _manifestDestinationParts(
-        self, destinationPath: Path
-    ) -> tuple[str, Literal["scriptDir", "projectDir"]]:
-        """
-        Build manifest destination path and base hint for uninstall resolution.
+class FileEntry(TypedDict):
+    """Single source file declaration for a datagroup."""
 
-        Args:
-            destinationPath: Absolute destination path
+    name: str
+    tag: Tag
+    writePolicy: WritePolicy
 
-        Returns:
-            Tuple of relative destination path and destination base name
+    @staticmethod
+    def validate(obj: dict[str, Any]) -> FileEntry:
+        """Validate a raw JSON object as a datagroup file entry."""
+        if "name" not in obj or not isinstance(obj["name"], str):
+            raise ValueError("Invalid File: 'name' is required and must be a string")
+        fileName = obj["name"]
+        if fileName == "":
+            raise ValueError("Invalid File: 'name' must be non-empty")
+        if "/" in fileName or "\\" in fileName:
+            raise ValueError("Invalid File: 'name' must not include path separators")
+        for reservedChar in RESERVED_FILE_CHARS:
+            if reservedChar in fileName:
+                raise ValueError(
+                    f"Invalid File: 'name' contains reserved character '{reservedChar}'"
+                )
+        fileStem = fileName.split(".", 1)[0].upper()
+        if fileStem in RESERVED_WINDOWS_NAMES:
+            raise ValueError(f"Invalid File: 'name' uses reserved name '{fileStem}'")
 
-        Raises:
-            ValueError: If destination cannot be represented relative to known bases
-        """
-        try:
-            relativeToScript: Path = destinationPath.relative_to(self.scriptDir)
-            return str(relativeToScript), "scriptDir"
-        except ValueError:
-            pass
+        if "tag" not in obj or not isinstance(obj["tag"], dict):
+            raise ValueError("Invalid File: 'tag' is required and must be an object")
+        tagObj = Tag.validate(cast(dict[str, Any], obj["tag"]))
+        obj["tag"] = tagObj
 
-        if self.projectDir is not None:
-            try:
-                relativeToProject: Path = destinationPath.relative_to(self.projectDir)
-                return str(relativeToProject), "projectDir"
-            except ValueError:
-                pass
+        if "writePolicy" not in obj or not isinstance(obj["writePolicy"], str):
+            raise ValueError(
+                "Invalid File: 'writePolicy' is required and must be a string"
+            )
+        if obj["writePolicy"] not in {"force", "copy", "skip"}:
+            raise ValueError(
+                "Invalid File: 'writePolicy' must be 'force', 'copy', or 'skip'"
+            )
 
-        raise ValueError(
-            f"Destination cannot be represented relative to scriptDir or projectDir: {destinationPath}"
+        return cast(FileEntry, obj)
+
+
+class DataGroup(TypedDict):
+    """Datagroup configuration containing files to install."""
+
+    fileList: list[FileEntry]
+
+    @staticmethod
+    def validate(obj: dict[str, Any]) -> DataGroup:
+        """Validate a raw JSON object as a DataGroup."""
+        if "fileList" not in obj:
+            raise ValueError("Invalid DataGroup: missing required key 'fileList'")
+        if not isinstance(obj["fileList"], list):
+            raise ValueError("Invalid DataGroup: 'fileList' must be an array")
+
+        rawFileList = cast(list[Any], obj["fileList"])
+        if len(rawFileList) == 0:
+            raise ValueError("Invalid DataGroup: 'fileList' must contain at least one entry")
+
+        seenFileNames: set[str] = set()
+        validatedFileList: list[FileEntry] = []
+        for fileObj in rawFileList:
+            if not isinstance(fileObj, dict):
+                raise ValueError("Invalid DataGroup: each fileList entry must be an object")
+            validatedFile = FileEntry.validate(cast(dict[str, Any], fileObj))
+            fileName = validatedFile["name"]
+            if fileName in seenFileNames:
+                raise ValueError(f"Invalid DataGroup: duplicate file entry '{fileName}'")
+            seenFileNames.add(fileName)
+            validatedFileList.append(validatedFile)
+
+        obj["fileList"] = validatedFileList
+        return cast(DataGroup, obj)
+
+
+class Directory(TypedDict):
+    """Directory node in the frame directory tree."""
+
+    name: str
+    tagList: list[Tag]
+    directoryList: list["Directory"]
+
+    @staticmethod
+    def validate(obj: dict[str, Any]) -> Directory:
+        """Validate directory structure shape and nested objects."""
+        if "name" not in obj or not isinstance(obj["name"], str):
+            raise ValueError("Invalid Directory: 'name' is required and must be a string")
+        if obj["name"] == "":
+            raise ValueError("Invalid Directory: 'name' must be non-empty")
+        if "/" in obj["name"] or "\\" in obj["name"]:
+            raise ValueError("Invalid Directory: 'name' must not include path separators")
+        for reservedChar in RESERVED_FILE_CHARS:
+            if reservedChar in obj["name"]:
+                raise ValueError(
+                    f"Invalid Directory: 'name' contains reserved character '{reservedChar}'"
+                )
+
+        if "tagList" not in obj or not isinstance(obj["tagList"], list):
+            raise ValueError("Invalid Directory: 'tagList' is required and must be an array")
+        if "directoryList" not in obj or not isinstance(obj["directoryList"], list):
+            raise ValueError(
+                "Invalid Directory: 'directoryList' is required and must be an array"
+            )
+
+        validatedTagList: list[Tag] = []
+        for rawTag in cast(list[Any], obj["tagList"]):
+            if not isinstance(rawTag, dict):
+                raise ValueError("Invalid Directory: each tagList entry must be an object")
+            validatedTag = Tag.validate(cast(dict[str, Any], rawTag))
+            validatedTagList.append(validatedTag)
+
+        validatedDirectoryList: list[Directory] = []
+        seenChildNames: set[str] = set()
+        for rawDirectory in cast(list[Any], obj["directoryList"]):
+            if not isinstance(rawDirectory, dict):
+                raise ValueError(
+                    "Invalid Directory: each directoryList entry must be an object"
+                )
+            validatedDirectory = Directory.validate(cast(dict[str, Any], rawDirectory))
+            childName = validatedDirectory["name"]
+            if childName in seenChildNames:
+                raise ValueError(
+                    f"Invalid Directory: duplicate child directory name '{childName}'"
+                )
+            seenChildNames.add(childName)
+            validatedDirectoryList.append(validatedDirectory)
+
+        obj["tagList"] = validatedTagList
+        obj["directoryList"] = validatedDirectoryList
+        return cast(Directory, obj)
+
+
+class FrameData(TypedDict):
+    """Frame installation configuration loaded from frameData.config.json."""
+
+    projectDirectory: str
+    tagList: list[Tag]
+    directoryList: list[Directory]
+    dataGroupList: list[str]
+
+    @staticmethod
+    def validate(obj: dict[str, Any]) -> FrameData:
+        """Validate top-level frame config structure and basic types."""
+        requiredKeys = ["projectDirectory", "tagList", "directoryList", "dataGroupList"]
+        for requiredKey in requiredKeys:
+            if requiredKey not in obj:
+                raise ValueError(
+                    f"Invalid FrameData: missing required top-level key '{requiredKey}'"
+                )
+
+        if not isinstance(obj["projectDirectory"], str):
+            raise ValueError("Invalid FrameData: 'projectDirectory' must be a string")
+        if not isinstance(obj["tagList"], list):
+            raise ValueError("Invalid FrameData: 'tagList' must be an array")
+        if not isinstance(obj["directoryList"], list):
+            raise ValueError("Invalid FrameData: 'directoryList' must be an array")
+        if not isinstance(obj["dataGroupList"], list):
+            raise ValueError("Invalid FrameData: 'dataGroupList' must be an array")
+
+        validatedTagList: list[Tag] = []
+        for rawTag in cast(list[Any], obj["tagList"]):
+            if not isinstance(rawTag, dict):
+                raise ValueError("Invalid FrameData: each tagList entry must be an object")
+            validatedTag = Tag.validate(cast(dict[str, Any], rawTag))
+            validatedTagList.append(validatedTag)
+
+        validatedDirectoryList: list[Directory] = []
+        seenTopDirectoryNames: set[str] = set()
+        for rawDirectory in cast(list[Any], obj["directoryList"]):
+            if not isinstance(rawDirectory, dict):
+                raise ValueError(
+                    "Invalid FrameData: each directoryList entry must be an object"
+                )
+            validatedDirectory = Directory.validate(cast(dict[str, Any], rawDirectory))
+            directoryName = validatedDirectory["name"]
+            if directoryName in seenTopDirectoryNames:
+                raise ValueError(
+                    f"Invalid FrameData: duplicate top-level directory '{directoryName}'"
+                )
+            seenTopDirectoryNames.add(directoryName)
+            validatedDirectoryList.append(validatedDirectory)
+
+        validatedDataGroupList: list[str] = []
+        seenDataGroupNames: set[str] = set()
+        for rawDataGroup in cast(list[Any], obj["dataGroupList"]):
+            if not isinstance(rawDataGroup, str):
+                raise ValueError("Invalid FrameData: dataGroupList must contain only strings")
+            if rawDataGroup in seenDataGroupNames:
+                raise ValueError(
+                    f"Invalid FrameData: duplicate dataGroup entry '{rawDataGroup}'"
+                )
+            seenDataGroupNames.add(rawDataGroup)
+            validatedDataGroupList.append(rawDataGroup)
+
+        obj["tagList"] = validatedTagList
+        obj["directoryList"] = validatedDirectoryList
+        obj["dataGroupList"] = validatedDataGroupList
+        return cast(FrameData, obj)
+
+
+class PathContext(TypedDict):
+    """Resolved paths for Project repo and Parent target roots."""
+
+    projectRoot: Path
+    targetRoot: Path
+
+
+def fail(message: str) -> None:
+    """Print an error message and exit with status code 1."""
+    print(f"Error: {message}")
+    sys.exit(1)
+
+
+def warn(message: str) -> None:
+    """Print a warning message."""
+    print(f"Warning: {message}")
+
+
+def loadJsonFile(filePath: Path) -> dict[str, Any]:
+    """Load a JSON file and return the object with user-facing errors."""
+    if not filePath.exists():
+        fail(f"{filePath} not found")
+    try:
+        with filePath.open("r", encoding="utf-8") as inputFile:
+            loaded = json.load(inputFile)
+    except JSONDecodeError as error:
+        fail(f"Failed to parse JSON in {filePath}: {error}")
+    except OSError as error:
+        fail(f"Unable to read {filePath}: {error}")
+
+    if not isinstance(loaded, dict):
+        fail(f"{filePath} must contain a top-level JSON object")
+    return cast(dict[str, Any], loaded)
+
+
+def writeJsonFile(filePath: Path, payload: dict[str, Any]) -> None:
+    """Write JSON to disk with stable formatting."""
+    try:
+        with filePath.open("w", encoding="utf-8") as outputFile:
+            json.dump(payload, outputFile, indent=2)
+    except OSError as error:
+        fail(f"Unable to write {filePath}: {error}")
+
+
+def resolveTargetRoot(projectRoot: Path, frameData: FrameData) -> Path:
+    """Resolve and validate the install target root in the Parent repo."""
+    projectDirectory = frameData["projectDirectory"]
+    projectDirectoryPath = Path(projectDirectory)
+
+    if projectDirectoryPath.is_absolute():
+        fail("FrameData projectDirectory must be relative and cannot be absolute")
+
+    for pathPart in projectDirectoryPath.parts:
+        if pathPart == "..":
+            fail("FrameData projectDirectory must not contain path traversal '..'")
+
+    resolvedTargetRoot = projectRoot.parent.joinpath(projectDirectoryPath)
+    if not resolvedTargetRoot.exists():
+        fail(
+            f"Resolved projectDirectory does not exist: {resolvedTargetRoot}"
         )
 
-    def _installFile(self, fileElem: FileElement, baseDir: Path) -> bool:
-        """
-        Install a single file.
+    return resolvedTargetRoot
 
-        Args:
-            fileElem: File element from config
-            baseDir: Base directory for installation
 
-        Returns:
-            True if file installed successfully
-        """
-        fileName: str = fileElem.get("fileName", "")
-        sourceDir: str = fileElem.get("sourceDirectory", "")
-        destination: str = fileElem.get("destination", "")
-        fileType: str = fileElem.get("type", "copy")
-        writePolicy: str = fileElem.get("writePolicy", "overWrite")
+def flattenDirectories(
+    parentPath: Path,
+    directoryList: list[Directory],
+) -> list[Path]:
+    """Flatten nested directory definitions into absolute directory paths."""
+    flattened: list[Path] = []
+    seenResolvedPaths: set[Path] = set()
 
-        if not fileName:
-            print("Error: fileName is required for file element")
-            return False
+    def walkDirectories(currentParent: Path, currentDirectories: list[Directory]) -> None:
+        """Recursively accumulate resolved directory paths."""
+        for directoryObj in currentDirectories:
+            resolvedPath = currentParent.joinpath(directoryObj["name"])
+            if resolvedPath in seenResolvedPaths:
+                fail(f"Conflicting directory definitions resolve to {resolvedPath}")
+            seenResolvedPaths.add(resolvedPath)
+            flattened.append(resolvedPath)
+            walkDirectories(resolvedPath, directoryObj["directoryList"])
 
-        if sourceDir:
-            sourceFile: Path = self.scriptDir.joinpath(sourceDir).joinpath(fileName)
-        else:
-            sourceFile = self.scriptDir.joinpath(fileName)
+    walkDirectories(parentPath, directoryList)
+    return flattened
 
-        if not sourceFile.exists():
-            print(f"Error: Source file not found at {sourceFile}")
-            return False
 
-        if destination:
-            destDir: Path = baseDir.joinpath(destination)
-        else:
-            destDir = baseDir
+def buildTagDestinationMap(
+    parentPath: Path,
+    frameData: FrameData,
+) -> dict[tuple[str, str], list[Path]]:
+    """Build map from tag key to one or more destination directories."""
+    tagDestinationMap: dict[tuple[str, str], list[Path]] = {}
 
-        destDir.mkdir(parents=True, exist_ok=True)
-        destFile: Path = destDir.joinpath(fileName)
-        finalDestination: Path = destFile
+    def addTagDestination(tagObj: Tag, destinationPath: Path) -> None:
+        """Append a destination path for a specific tag key."""
+        tagKey = (tagObj["kind"], tagObj["name"])
+        if tagKey not in tagDestinationMap:
+            tagDestinationMap[tagKey] = []
+        tagDestinationMap[tagKey].append(destinationPath)
+
+    for rootTag in frameData["tagList"]:
+        addTagDestination(rootTag, parentPath)
+
+    def walkDirectories(currentParent: Path, currentDirectories: list[Directory]) -> None:
+        """Walk directories and register tag destinations."""
+        for directoryObj in currentDirectories:
+            directoryPath = currentParent.joinpath(directoryObj["name"])
+            for tagObj in directoryObj["tagList"]:
+                addTagDestination(tagObj, directoryPath)
+            walkDirectories(directoryPath, directoryObj["directoryList"])
+
+    walkDirectories(parentPath, frameData["directoryList"])
+    return tagDestinationMap
+
+
+def validateTagUniqueness(frameData: FrameData) -> None:
+    """Ensure every Tag.name is unique across the project config."""
+    seenTagNames: set[str] = set()
+
+    def registerTag(tagObj: Tag) -> None:
+        """Register one tag name and enforce global uniqueness."""
+        tagName = tagObj["name"]
+        if tagName in seenTagNames:
+            fail(f"Duplicate Tag.name detected in frame config: '{tagName}'")
+        seenTagNames.add(tagName)
+
+    for rootTag in frameData["tagList"]:
+        registerTag(rootTag)
+
+    def walkDirectories(currentDirectories: list[Directory]) -> None:
+        """Recursively register tags from directory tree."""
+        for directoryObj in currentDirectories:
+            for tagObj in directoryObj["tagList"]:
+                registerTag(tagObj)
+            walkDirectories(directoryObj["directoryList"])
+
+    walkDirectories(frameData["directoryList"])
+
+
+def resolveGroupDirectory(projectRoot: Path, dataGroupName: str) -> Path:
+    """Return the datagroup directory path, validating existence."""
+    groupDirectory = projectRoot.joinpath(dataGroupName)
+    if not groupDirectory.exists() or not groupDirectory.is_dir():
+        fail(f"DataGroup directory not found: {groupDirectory}")
+    return groupDirectory
+
+
+def resolveGroupConfigPath(groupDirectory: Path, dataGroupName: str) -> Path:
+    """Return datagroup config path, validating file presence."""
+    groupConfigPath = groupDirectory.joinpath(f"{dataGroupName}.dataGroup.json")
+    if not groupConfigPath.exists():
+        fail(f"DataGroup config file not found: {groupConfigPath}")
+    return groupConfigPath
+
+
+def loadAndValidateFrameData(projectRoot: Path) -> tuple[FrameData, PathContext]:
+    """Load, validate, and normalize frame configuration and path context."""
+    frameConfigPath = projectRoot.joinpath(FRAME_CONFIG_NAME)
+    rawFrameDataObj = loadJsonFile(frameConfigPath)
+    try:
+        frameData = FrameData.validate(rawFrameDataObj)
+    except ValueError as error:
+        fail(str(error))
+
+    validateTagUniqueness(frameData)
+
+    targetRoot = resolveTargetRoot(projectRoot, frameData)
+
+    for dataGroupName in frameData["dataGroupList"]:
+        groupDirectory = projectRoot.joinpath(dataGroupName)
+        if not groupDirectory.exists() or not groupDirectory.is_dir():
+            fail(
+                "DataGroup listed in frameData is missing directory: "
+                f"{groupDirectory}"
+            )
+        groupConfigPath = groupDirectory.joinpath(f"{dataGroupName}.dataGroup.json")
+        if not groupConfigPath.exists() or not groupConfigPath.is_file():
+            fail(
+                "DataGroup listed in frameData is missing config file: "
+                f"{groupConfigPath}"
+            )
+
+    pathContext: PathContext = PathContext(
+        projectRoot=projectRoot,
+        targetRoot=targetRoot,
+    )
+    return frameData, pathContext
+
+
+def loadAndValidateDataGroup(projectRoot: Path, dataGroupName: str) -> tuple[DataGroup, Path]:
+    """Load and validate one datagroup file and source file existence."""
+    groupDirectory = resolveGroupDirectory(projectRoot, dataGroupName)
+    groupConfigPath = resolveGroupConfigPath(groupDirectory, dataGroupName)
+    rawDataGroupObj = loadJsonFile(groupConfigPath)
+
+    try:
+        dataGroup = DataGroup.validate(rawDataGroupObj)
+    except ValueError as error:
+        fail(str(error))
+
+    for fileEntry in dataGroup["fileList"]:
+        sourcePath = groupDirectory.joinpath(fileEntry["name"])
+        if not sourcePath.exists() or not sourcePath.is_file():
+            fail(f"Source file listed in DataGroup is missing: {sourcePath}")
+
+    return dataGroup, groupDirectory
+
+
+def resolveDestinationDirectory(
+    fileEntry: FileEntry,
+    tagDestinationMap: dict[tuple[str, str], list[Path]],
+) -> Path:
+    """Resolve a file entry tag to exactly one destination directory."""
+    tagObj = fileEntry["tag"]
+    tagKey = (tagObj["kind"], tagObj["name"])
+    destinationList = tagDestinationMap.get(tagKey, [])
+    if len(destinationList) != 1:
+        fail(
+            "Unable to resolve tag to exactly one destination for file "
+            f"'{fileEntry['name']}', tag={tagObj}"
+        )
+    return destinationList[0]
+
+
+def installFrame(frameData: FrameData, targetRoot: Path) -> None:
+    """Create the directory tree defined by frameData."""
+    allDirectories = flattenDirectories(targetRoot, frameData["directoryList"])
+
+    for directoryPath in allDirectories:
+        if directoryPath.exists() and directoryPath.is_file():
+            fail(f"Cannot create directory because a file exists at: {directoryPath}")
+        if directoryPath.exists() and directoryPath.is_dir():
+            warn(f"Directory already exists, skipping: {directoryPath}")
+            continue
+        try:
+            directoryPath.mkdir(parents=True, exist_ok=False)
+        except PermissionError:
+            fail(f"Permission denied creating directory: {directoryPath}")
+        except OSError as error:
+            fail(f"Failed to create directory {directoryPath}: {error}")
+
+
+def detectInstalledDataGroups(
+    frameData: FrameData,
+    projectRoot: Path,
+    targetRoot: Path,
+) -> list[str]:
+    """Detect datagroups with at least one file currently present in destinations."""
+    installedDataGroups: list[str] = []
+    tagDestinationMap = buildTagDestinationMap(targetRoot, frameData)
+
+    for dataGroupName in frameData["dataGroupList"]:
+        groupDirectory = projectRoot.joinpath(dataGroupName)
+        groupConfigPath = groupDirectory.joinpath(f"{dataGroupName}.dataGroup.json")
+        if not groupConfigPath.exists():
+            continue
+        rawDataGroupObj = loadJsonFile(groupConfigPath)
+        try:
+            dataGroup = DataGroup.validate(rawDataGroupObj)
+        except ValueError:
+            continue
+
+        isInstalled = False
+        for fileEntry in dataGroup["fileList"]:
+            destinationDirectory = resolveDestinationDirectory(fileEntry, tagDestinationMap)
+            destinationPath = destinationDirectory.joinpath(fileEntry["name"])
+            if destinationPath.exists():
+                isInstalled = True
+                break
+        if isInstalled:
+            installedDataGroups.append(dataGroupName)
+
+    return installedDataGroups
+
+
+def uninstallFrame(frameData: FrameData, pathContext: PathContext) -> None:
+    """Attempt to remove frame directories, leaving non-empty directories intact."""
+    projectRoot = pathContext["projectRoot"]
+    targetRoot = pathContext["targetRoot"]
+
+    detectedInstalled = detectInstalledDataGroups(frameData, projectRoot, targetRoot)
+    if len(detectedInstalled) > 0:
+        fail(
+            "DataGroup files are still present. Uninstall DataGroups first: "
+            f"{', '.join(detectedInstalled)}"
+        )
+
+    allDirectories = flattenDirectories(targetRoot, frameData["directoryList"])
+    allDirectories.sort(key=lambda pathObj: len(pathObj.parts), reverse=True)
+
+    for directoryPath in allDirectories:
+        if not directoryPath.exists():
+            warn(f"Directory does not exist during uninstall, skipping: {directoryPath}")
+            continue
+        if directoryPath.is_file():
+            warn(f"Expected a directory but found a file, skipping: {directoryPath}")
+            continue
 
         try:
-            if fileType == "link":
-                if destFile.exists() or destFile.is_symlink():
-                    destFile.unlink()
-                os.symlink(sourceFile.resolve(), destFile)
-                print(f"Linked: {sourceFile} -> {destFile}")
-            else:  # copy
-                if destFile.exists() or destFile.is_symlink():
-                    if writePolicy == "skip":
-                        print(f"Skipped copy (exists): {destFile}")
-                        return True
-                    if writePolicy == "createCopy":
-                        finalDestination = destDir.joinpath(f"{fileName}.tmp")
-                        print(
-                            "WARNING createCopy preserved existing destination "
-                            f"'{destFile}' and wrote new copy '{finalDestination}'; "
-                            "original file was not overwritten."
-                        )
-                    else:
-                        finalDestination = destFile
-                shutil.copy2(sourceFile, finalDestination)
-                print(f"Copied: {sourceFile} -> {finalDestination}")
+            if any(directoryPath.iterdir()):
+                warn(f"Directory is not empty, skipping removal: {directoryPath}")
+                continue
+            directoryPath.rmdir()
+        except PermissionError:
+            fail(f"Permission denied removing directory: {directoryPath}")
+        except OSError as error:
+            fail(f"Failed removing directory {directoryPath}: {error}")
 
-            if self.tracker:
-                manifestSource: str = self._manifestRelativeFromScriptDir(sourceFile)
-                manifestDestination, manifestBase = self._manifestDestinationParts(
-                    finalDestination
-                )
-                self.tracker.addFile(manifestSource, manifestDestination, manifestBase)
 
-        except (OSError, IOError, ValueError) as e:
-            print(f"Error installing file {fileName}: {e}")
-            return False
+def ensureSupportedDataGroup(frameData: FrameData, dataGroupName: str) -> None:
+    """Ensure requested datagroup exists in frameData dataGroupList."""
+    if dataGroupName not in frameData["dataGroupList"]:
+        fail(f"Unsupported DataGroup requested: {dataGroupName}")
 
-        return True
 
-    def _installDirectory(self, dirElem: DirectoryElement, baseDir: Path) -> bool:
-        """
-        Install a directory.
+def applyWritePolicy(
+    sourcePath: Path,
+    destinationPath: Path,
+    writePolicy: WritePolicy,
+) -> None:
+    """Apply write policy for one source and destination file pair."""
+    if destinationPath.exists() and destinationPath.is_dir():
+        fail(
+            "Destination path exists as a directory where a file is required: "
+            f"{destinationPath}"
+        )
 
-        Args:
-            dirElem: Directory element from config
-            baseDir: Base directory for installation
-
-        Returns:
-            True if directory installed successfully
-        """
-        sourceName: str = dirElem.get("sourceName", "")
-        destinationName: str = dirElem.get("destinationName", "")
-        dirType: str = dirElem.get("type", "copy")
-
-        if not sourceName:
-            print("Error: sourceName is required for directory element")
-            return False
-
-        sourceDir: Path = self.scriptDir.joinpath(sourceName)
-
-        if not sourceDir.exists():
-            print(f"Error: Source directory not found at {sourceDir}")
-            return False
-
-        if destinationName:
-            destDir: Path = baseDir.joinpath(destinationName)
-        else:
-            destDir = baseDir.joinpath(sourceName)
-
+    if writePolicy == "force":
         try:
-            if dirType == "link":
-                if destDir.exists() or destDir.is_symlink():
-                    if destDir.is_symlink():
-                        destDir.unlink()
-                    else:
-                        shutil.rmtree(destDir)
-                os.symlink(sourceDir.resolve(), destDir)
-                print(f"Linked directory: {sourceDir} -> {destDir}")
-            else:  # copy
-                if destDir.exists():
-                    shutil.rmtree(destDir)
-                shutil.copytree(sourceDir, destDir)
-                print(f"Copied directory: {sourceDir} -> {destDir}")
+            shutil.copy2(sourcePath, destinationPath)
+        except OSError as error:
+            fail(f"Failed copying {sourcePath} -> {destinationPath}: {error}")
+        return
 
-            if self.tracker:
-                manifestSource = self._manifestRelativeFromScriptDir(sourceDir)
-                manifestDestination, manifestBase = self._manifestDestinationParts(destDir)
-                self.tracker.addDirectory(
-                    manifestSource,
-                    manifestDestination,
-                    manifestBase,
+    if writePolicy == "copy":
+        if destinationPath.exists():
+            tmpDestinationPath = destinationPath.with_name(
+                f"{destinationPath.stem}.tmp"
+            )
+            suffixCounter = 1
+            while tmpDestinationPath.exists():
+                tmpDestinationPath = destinationPath.with_name(
+                    f"{destinationPath.stem}-{suffixCounter}.tmp"
                 )
-
-        except (OSError, IOError, shutil.Error, ValueError) as e:
-            print(f"Error installing directory {sourceName}: {e}")
-            return False
-
-        return True
-
-    def uninstall(self) -> bool:
-        """
-        Perform uninstallation based on manifest file.
-
-        Returns:
-            True if uninstallation successful
-        """
-        if not self.loadConfig():
-            return False
-
-        try:
-            self.validateConfig(cast(InstallConfig, self.config))
-        except ValueError as e:
-            print(f"Error: {e}")
-            return False
-
-        if not self.resolveProjectDirectory():
-            return False
-
-        manifestFileName: str = self.config["manifestFile"]
-        if not manifestFileName:
-            print("Error: No manifestFile defined in config")
-            return False
-
-        manifestPath: Path = self.projectDir.joinpath(manifestFileName)
-        self.tracker = InstallationTracker(manifestPath)
-
-        try:
-            manifestLoaded: bool = self.tracker.loadManifest()
-        except ValueError as e:
-            print(f"Error: {e}")
-            return False
-
-        if not manifestLoaded:
-            print(f"Error: Manifest file not found at {manifestPath}")
-            return False
-
-        installedItems: list[dict[str, Any]] = self.tracker.installedItems
-        for i in range(len(installedItems) - 1, -1, -1):
-            item: dict[str, Any] = installedItems[i]
-            itemType: str = str(item.get("type", ""))
-
-            destinationValue: Any = item.get("destination", "")
-            if not isinstance(destinationValue, str) or destinationValue == "":
-                print("Error: invalid manifest entry destination path")
-                return False
-
-            manifestDestinationPath: Path = Path(destinationValue)
-            if manifestDestinationPath.is_absolute():
-                print(
-                    "Error: invalid manifest entry destination path; absolute paths are not allowed"
-                )
-                return False
-            if ".." in manifestDestinationPath.parts:
-                print(
-                    "Error: invalid manifest entry destination path; traversal is not allowed"
-                )
-                return False
-
-            destinationBaseValue: Any = item.get("destinationBase", "scriptDir")
-            if destinationBaseValue == "projectDir":
-                destPath: Path = self.projectDir.joinpath(manifestDestinationPath)
-            elif destinationBaseValue == "scriptDir" or destinationBaseValue == "":
-                destPath = self.scriptDir.joinpath(manifestDestinationPath)
-            else:
-                print("Error: invalid manifest entry destination base")
-                return False
-
+                suffixCounter += 1
             try:
-                if itemType == "file":
-                    if destPath.exists() or destPath.is_symlink():
-                        destPath.unlink()
-                        print(f"Removed file: {destPath}")
-                elif itemType == "directory":
-                    if destPath.is_symlink():
-                        destPath.unlink()
-                    elif destPath.exists():
-                        shutil.rmtree(destPath)
-                    print(f"Removed directory: {destPath}")
+                shutil.copy2(sourcePath, tmpDestinationPath)
+            except OSError as error:
+                fail(f"Failed copying {sourcePath} -> {tmpDestinationPath}: {error}")
+        else:
+            try:
+                shutil.copy2(sourcePath, destinationPath)
+            except OSError as error:
+                fail(f"Failed copying {sourcePath} -> {destinationPath}: {error}")
+        return
 
-            except (OSError, IOError, shutil.Error) as e:
-                print(f"Error removing {destinationValue}: {e}")
-                return False
+    if writePolicy == "skip":
+        if destinationPath.exists():
+            return
+        try:
+            shutil.copy2(sourcePath, destinationPath)
+        except OSError as error:
+            fail(f"Failed copying {sourcePath} -> {destinationPath}: {error}")
+        return
+
+    fail(f"Unknown write policy '{writePolicy}'")
+
+
+def installDataGroup(frameData: FrameData, pathContext: PathContext, dataGroupName: str) -> None:
+    """Install one datagroup into resolved frame directories."""
+    projectRoot = pathContext["projectRoot"]
+    targetRoot = pathContext["targetRoot"]
+
+    ensureSupportedDataGroup(frameData, dataGroupName)
+
+    dataGroup, groupDirectory = loadAndValidateDataGroup(projectRoot, dataGroupName)
+    tagDestinationMap = buildTagDestinationMap(targetRoot, frameData)
+
+    for fileEntry in dataGroup["fileList"]:
+        destinationDirectory = resolveDestinationDirectory(fileEntry, tagDestinationMap)
+        if not destinationDirectory.exists() or not destinationDirectory.is_dir():
+            fail(
+                "Resolved destination directory does not exist. Install frame first: "
+                f"{destinationDirectory}"
+            )
+
+        sourcePath = groupDirectory.joinpath(fileEntry["name"])
+        destinationPath = destinationDirectory.joinpath(fileEntry["name"])
+        applyWritePolicy(sourcePath, destinationPath, fileEntry["writePolicy"])
+
+
+def uninstallDataGroup(
+    frameData: FrameData,
+    pathContext: PathContext,
+    dataGroupName: str,
+) -> None:
+    """Uninstall one datagroup from resolved frame directories."""
+    projectRoot = pathContext["projectRoot"]
+    targetRoot = pathContext["targetRoot"]
+
+    ensureSupportedDataGroup(frameData, dataGroupName)
+
+    dataGroup, _groupDirectory = loadAndValidateDataGroup(projectRoot, dataGroupName)
+    tagDestinationMap = buildTagDestinationMap(targetRoot, frameData)
+
+    isInstalled = False
+    for fileEntry in dataGroup["fileList"]:
+        destinationDirectory = resolveDestinationDirectory(fileEntry, tagDestinationMap)
+        destinationPath = destinationDirectory.joinpath(fileEntry["name"])
+        if destinationPath.exists():
+            isInstalled = True
+            break
+
+    if not isInstalled:
+        warn(
+            "Requested DataGroup is not currently installed; no filesystem changes made"
+        )
+        return
+
+    for fileEntry in dataGroup["fileList"]:
+        destinationDirectory = resolveDestinationDirectory(fileEntry, tagDestinationMap)
+        destinationPath = destinationDirectory.joinpath(fileEntry["name"])
+
+        if not destinationPath.exists():
+            warn(f"File to uninstall is missing: {destinationPath}")
+            continue
+
+        if destinationPath.is_dir():
+            warn(
+                "Resolved uninstall path is a directory, skipping file removal: "
+                f"{destinationPath}"
+            )
+            continue
 
         try:
-            manifestPath.unlink()
-            print(f"Removed manifest: {manifestPath}")
-        except OSError as e:
-            print(f"Error removing manifest: {e}")
-            return False
+            destinationPath.unlink()
+        except PermissionError:
+            fail(f"Permission denied removing file: {destinationPath}")
+        except OSError as error:
+            fail(f"Failed removing file {destinationPath}: {error}")
 
-        print("Uninstallation completed successfully!")
-        return True
+
+def resolveRequestedDataGroups(
+    frameData: FrameData,
+    requestedDataGroupName: str,
+) -> list[str]:
+    """Resolve one or many datagroup names from CLI input."""
+    if requestedDataGroupName == ALL_DATA_GROUP_NAME:
+        resolvedDataGroups: list[str] = []
+        for dataGroupName in frameData["dataGroupList"]:
+            resolvedDataGroups.append(dataGroupName)
+        return resolvedDataGroups
+
+    ensureSupportedDataGroup(frameData, requestedDataGroupName)
+    return [requestedDataGroupName]
+
+
+def installRequestedDataGroups(
+    frameData: FrameData,
+    pathContext: PathContext,
+    requestedDataGroupName: str,
+) -> None:
+    """Install one or all datagroups based on the CLI request."""
+    if requestedDataGroupName != ALL_DATA_GROUP_NAME:
+        installDataGroup(frameData, pathContext, requestedDataGroupName)
+        return
+
+    orderedDataGroups = resolveRequestedDataGroups(frameData, requestedDataGroupName)
+    for dataGroupName in orderedDataGroups:
+        try:
+            installDataGroup(frameData, pathContext, dataGroupName)
+        except SystemExit:
+            fail(f"Failed installing DataGroup '{dataGroupName}'")
+
+
+def uninstallRequestedDataGroups(
+    frameData: FrameData,
+    pathContext: PathContext,
+    requestedDataGroupName: str,
+) -> None:
+    """Uninstall one or all datagroups based on the CLI request."""
+    if requestedDataGroupName != ALL_DATA_GROUP_NAME:
+        uninstallDataGroup(frameData, pathContext, requestedDataGroupName)
+        return
+
+    orderedDataGroups = resolveRequestedDataGroups(frameData, requestedDataGroupName)
+    for dataGroupName in orderedDataGroups:
+        try:
+            uninstallDataGroup(frameData, pathContext, dataGroupName)
+        except SystemExit:
+            fail(f"Failed uninstalling DataGroup '{dataGroupName}'")
+
+
+def parseArgs() -> argparse.Namespace:
+    """Parse CLI arguments for frame and datagroup operations."""
+    parser = argparse.ArgumentParser(
+        description="Install or uninstall frame directories and datagroup files"
+    )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    frameParser = subparsers.add_parser("frame", help="Install or uninstall frame")
+    frameParser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Uninstall frame directory structure",
+    )
+
+    dataGroupParser = subparsers.add_parser(
+        "datagroup", help="Install or uninstall a datagroup"
+    )
+    dataGroupParser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Uninstall datagroup files",
+    )
+    dataGroupParser.add_argument(
+        "dataGroupName",
+        help="DataGroup name or 'all'",
+    )
+
+    return parser.parse_args()
 
 
 def main() -> None:
-    """Main entry point for the installer."""
-    parser: argparse.ArgumentParser = argparse.ArgumentParser(
-        description="Install or uninstall components based on install.config.json"
-    )
+    """Run the installer CLI."""
+    args = parseArgs()
 
-    parser.add_argument(
-        "command",
-        choices=["install", "uninstall"],
-        help="Command to execute: install or uninstall",
-    )
+    projectRoot = Path(os.getcwd())
+    frameData, pathContext = loadAndValidateFrameData(projectRoot)
 
-    args: argparse.Namespace = parser.parse_args()
+    if args.command == "frame":
+        if args.uninstall:
+            uninstallFrame(frameData, pathContext)
+        else:
+            installFrame(frameData, pathContext["targetRoot"])
+        return
 
-    scriptDir: Path = Path(__file__).parent.resolve()
-    configPath: Path = scriptDir.joinpath("install.config.json")
+    if args.command == "datagroup":
+        dataGroupName = cast(str, args.dataGroupName)
+        if args.uninstall:
+            uninstallRequestedDataGroups(frameData, pathContext, dataGroupName)
+        else:
+            installRequestedDataGroups(frameData, pathContext, dataGroupName)
+        return
 
-    installer: Installer = Installer(configPath)
-
-    if args.command == "install":
-        success: bool = installer.install()
-    else:  # uninstall
-        success = installer.uninstall()
-
-    sys.exit(0 if success else 1)
+    fail(f"Unsupported command: {args.command}")
 
 
 if __name__ == "__main__":

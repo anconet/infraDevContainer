@@ -1,0 +1,28 @@
+{
+  "fileList": [
+    {
+      "name": "devcontainer.json",
+      "tag": {
+        "kind": "location",
+        "name": "Tag-devcontainer"
+      },
+      "writePolicy": "force"
+    },
+    {
+      "name": "Dockerfile",
+      "tag": {
+        "kind": "location",
+        "name": "Tag-devcontainer"
+      },
+      "writePolicy": "force"
+    },
+    {
+      "name": "post-create.sh",
+      "tag": {
+        "kind": "location",
+        "name": "Tag-devcontainer"
+      },
+      "writePolicy": "force"
+    }
+  ]
+}

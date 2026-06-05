@@ -1,3 +1,6 @@
 [submodule "infraInstall"]
 	path = infraInstall
 	url = https://github.com/anconet/infraInstall.git
+[submodule "infraInstallFrame"]
+	path = infraInstallFrame
+	url = https://github.com/anconet/infraInstallFrame.git
