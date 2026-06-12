@@ -4,10 +4,13 @@
   "directoryList": [
     {
       "name": ".devcontainer",
-      "tag": {
-        "kind": "location",
-        "name": "Tag-devcontainer"
-      }
+      "tagList": [
+        {
+          "kind": "location",
+          "name": "TagDevcontainer"
+        }
+      ],
+      "directoryList": []
     }
   ],
   "dataGroupList": [
