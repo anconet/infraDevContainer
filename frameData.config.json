@@ -1,4 +1,28 @@
 {
+  "__comment": {
+    "__description": "This is a configuration file for FrameData. It contains settings and information about the project, including the project directory, tags, directories, and data groups.",
+    "projectDirectory": "The path to the project directory. This should be set to the location where your project files are stored.",
+    "tagList": {
+      "__description": "A list of tags that are used to categorize and label different elements in the project. Each tag has a kind and a name.",
+      "__array": [
+        {
+          "kind": "The type of tag. This can be used to categorize tags based on their purpose or function.",
+          "name": "The name of the tag. This should be a unique identifier for the tag."
+        }
+      ]
+    },
+    "directoryList": {
+      "__description": "A list of directories that are part of the project. Each directory can be used to store different types of data or files related to the project.",
+      "__array": [
+        {
+          "name": "The name of the directory. This should be a unique identifier for the directory.",
+          "tagList": "A list of tags that are associated with this directory. This can be used to categorize the directory and its contents based on the tags.",
+          "directoryList": "A list of subdirectories that are contained within this directory. This can be used to create a hierarchical structure for organizing files and data within the project."
+        }
+      ]
+    },
+    "dataGroupList": "A list of data groups that are used to organize related data together. Each data group can contain multiple data items that are related to each other."
+  },
   "projectDirectory": "",
   "tagList": [],
   "directoryList": [
